@@ -289,7 +289,7 @@ class TicketPanelView(discord.ui.View):
         await self.create_ticket_channel(interaction, "Báo cáo thành viên vi phạm")
 
     # NÚT 2: BÁO LỖI HỆ THỐNG
-    @discord.ui.button(label="Báo lỗi/Bug", style=discord.ButtonStyle.gray, emoji="🐛", custom_id="btn_report_bug")
+    @discord.ui.button(label="Báo lỗi/Bug", style=discord.ButtonStyle.gray, emoji="⚠️", custom_id="btn_report_bug")
     async def btn_report_bug(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.create_ticket_channel(interaction, "Báo lỗi Server/Bot")
 
