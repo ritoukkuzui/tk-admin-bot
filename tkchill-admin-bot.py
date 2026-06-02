@@ -65,7 +65,7 @@ class MyBot(commands.Bot):
             print(f"Lỗi: {error}")
 
     # === VÒNG LẶP ĐI PING BOT 1 ===
-    @tasks.loop(minutes=14.0)
+    @tasks.loop(minutes=2.0)
     async def ping_bot1(self):
         bot1_url = os.environ.get("BOT1_URL")
         if bot1_url:
