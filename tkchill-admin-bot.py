@@ -17,6 +17,12 @@ MEMBER_ROLE_ID = 1375110178868826142
 OWNER_ID = 856704693215166474
 MARKETPLACE_CHANNEL_ID = 1461357458252365984
 
+# --- CẤU HÌNH TICKET ---
+TICKET_CATEGORY_ID = 1511235041781350511 # THAY ID DANH MỤC CHỨA TICKET VÀO ĐÂY
+ROLE_ADMIN_ID = 1365960976016347136 # ID Role Admin
+ROLE_DEV_ID = 1366433221687906304   # ID Role Dev
+ROLE_STAFF_ID = 1493908725231128617 # ID Role Staff
+
 # --- CẤU HÌNH VOTE ---
 VOTE_DURATION = 900  # 15 phút
 MIN_VOTES_REQUIRED = 4
@@ -50,6 +56,8 @@ class MyBot(commands.Bot):
         self.tree.on_error = self.on_app_command_error
         self.tree.copy_global_to(guild=discord.Object(id=GUILD_ID))
         await self.tree.sync(guild=discord.Object(id=GUILD_ID))
+
+        self.add_view(TicketPanelView())
         print(">> Đã đồng bộ tất cả lệnh Slash Commands!")
         
         # Chạy Web Server ngầm
@@ -164,6 +172,131 @@ class PublicVoteView(discord.ui.View):
         if self.message:
             try: await self.message.edit(view=None, embed=res_embed)
             except: pass
+
+# ==============================================================================
+#                        HỆ THỐNG TICKET HỖ TRỢ 
+# ==============================================================================
+
+class TicketControlView(discord.ui.View):
+    def __init__(self, creator: discord.Member):
+        super().__init__(timeout=None)
+        self.creator = creator
+
+    @discord.ui.button(label="Vấn đề đã giải quyết", style=discord.ButtonStyle.green, emoji="✅", custom_id="ticket_resolved")
+    async def resolve_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Ai có quyền hoặc chính chủ mới được đóng
+        if not has_permission(interaction) and interaction.user.id != self.creator.id:
+            return await interaction.response.send_message("❌ Bạn không có quyền đóng ticket này!", ephemeral=True)
+            
+        await interaction.response.send_message("🔄 Đang xử lý đóng ticket...", ephemeral=True)
+        
+        # Gửi DM cho người tạo ticket
+        try:
+            await self.creator.send(f"✅ Ticket hỗ trợ của bạn tại server **{interaction.guild.name}** đã được đánh dấu là **Đã Giải Quyết** và đóng lại bởi {interaction.user.name}.")
+        except discord.Forbidden:
+            pass # Bỏ qua nếu họ chặn tin nhắn người lạ
+            
+        # Xóa kênh ticket
+        await interaction.channel.delete(reason="Ticket đã được giải quyết.")
+
+    @discord.ui.button(label="Hủy Ticket", style=discord.ButtonStyle.red, emoji="🗑️", custom_id="ticket_cancel")
+    async def cancel_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not has_permission(interaction) and interaction.user.id != self.creator.id:
+            return await interaction.response.send_message("❌ Bạn không có quyền hủy ticket này!", ephemeral=True)
+
+        await interaction.response.send_message("🔄 Đang hủy ticket...", ephemeral=True)
+        
+        # Gửi DM cho người tạo ticket
+        try:
+            await self.creator.send(f"❌ Ticket của bạn tại server **{interaction.guild.name}** đã bị **Hủy/Từ chối** bởi {interaction.user.name}.")
+        except discord.Forbidden:
+            pass
+
+        # Xóa kênh ticket
+        await interaction.channel.delete(reason="Ticket bị hủy.")
+
+
+class TicketPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def create_ticket_channel(self, interaction: discord.Interaction, ticket_type: str):
+        guild = interaction.guild
+        category = guild.get_channel(TICKET_CATEGORY_ID)
+        
+        if not category:
+            return await interaction.response.send_message("❌ Lỗi hệ thống: Không tìm thấy danh mục chứa Ticket. Báo Dev ngay!", ephemeral=True)
+
+        # Lấy các Role quản trị
+        admin_role = guild.get_role(ROLE_ADMIN_ID)
+        dev_role = guild.get_role(ROLE_DEV_ID)
+        staff_role = guild.get_role(ROLE_STAFF_ID)
+
+        # Cài đặt quyền hạn cho kênh private
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False), # Chặn @everyone
+            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True), # Cho phép người gửi
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True) # Bot cần quyền
+        }
+
+        # Cấp quyền cho các role quản trị nếu lấy được ID
+        for role in [admin_role, dev_role, staff_role]:
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+
+        await interaction.response.defer(ephemeral=True) # Tránh lỗi "Interaction Failed" nếu tạo kênh lâu
+
+        # Tạo kênh
+        channel_name = f"ticket-{interaction.user.name}"
+        ticket_channel = await guild.create_text_channel(
+            name=channel_name,
+            category=category,
+            overwrites=overwrites,
+            reason=f"Tạo ticket loại: {ticket_type} bởi {interaction.user.name}"
+        )
+
+        # Gửi thông báo DM cho người dùng
+        try:
+            await interaction.user.send(f"💌 **Đã gửi yêu cầu!** Ticket của bạn đã được tạo thành công tại {ticket_channel.mention}. Vui lòng truy cập kênh đó và đợi Admin/Staff giải quyết nhé!")
+        except discord.Forbidden:
+            pass
+
+        # Gửi thông báo hoàn thành ở kênh hiện tại
+        await interaction.followup.send(f"✅ Đã mở ticket thành công! Hãy vào {ticket_channel.mention} để trao đổi.", ephemeral=True)
+
+        # Gửi tin nhắn vào trong kênh Ticket mới tạo
+        embed = discord.Embed(
+            title=f"🛠️ Yêu cầu hỗ trợ: {ticket_type}",
+            description=f"Xin chào {interaction.user.mention},\n\nVui lòng mô tả chi tiết vấn đề của bạn ở đây. Đội ngũ Ban Quản Trị sẽ phản hồi bạn sớm nhất có thể.",
+            color=discord.Color.blue()
+        )
+        embed.set_footer(text="Sử dụng các nút bên dưới để đóng ticket khi xong việc.")
+        
+        # Ping các role quản trị
+        ping_msg = ""
+        for role in [admin_role, dev_role, staff_role]:
+            if role: ping_msg += f"{role.mention} "
+            
+        await ticket_channel.send(
+            content=f"🔔 {ping_msg}\n{interaction.user.mention} vừa tạo một yêu cầu mới!",
+            embed=embed, 
+            view=TicketControlView(interaction.user)
+        )
+
+    # NÚT 1: BÁO CÁO VI PHẠM
+    @discord.ui.button(label="Báo cáo vi phạm", style=discord.ButtonStyle.blurple, emoji="🚨", custom_id="btn_report_member")
+    async def btn_report_member(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.create_ticket_channel(interaction, "Báo cáo thành viên vi phạm")
+
+    # NÚT 2: BÁO LỖI HỆ THỐNG
+    @discord.ui.button(label="Báo lỗi/Bug", style=discord.ButtonStyle.gray, emoji="🐛", custom_id="btn_report_bug")
+    async def btn_report_bug(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.create_ticket_channel(interaction, "Báo lỗi Server/Bot")
+
+    # NÚT 3: HỖ TRỢ KHÁC
+    @discord.ui.button(label="Hỗ trợ khác", style=discord.ButtonStyle.green, emoji="📩", custom_id="btn_other_help")
+    async def btn_other_help(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.create_ticket_channel(interaction, "Yêu cầu hỗ trợ chung")
 
 class EditTimeModal(discord.ui.Modal, title="Sửa thời gian Timeout"):
     def __init__(self, admin_view):
@@ -421,6 +554,24 @@ async def unmute_member(interaction: discord.Interaction, member: discord.Member
         await interaction.response.send_message(f"🔊 Đã gỡ cấm chat cho {member.mention}.")
     except discord.Forbidden:
         await interaction.response.send_message("❌ Bot không đủ quyền.", ephemeral=True)
+
+@bot.tree.command(name="setup_ticket", description="Hiển thị bảng tạo Ticket")
+@app_commands.checks.has_any_role(*ALLOWED_ROLES)
+@app_commands.default_permissions(moderate_members=True) # Chỉ người có quyền Admin Discord mới dùng được lệnh này
+async def setup_ticket(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🛠️ TRUNG TÂM HỖ TRỢ THÀNH VIÊN",
+        description=(
+            "Bạn đang gặp sự cố, muốn tố cáo thành viên vi phạm, hoặc cần liên hệ với Ban Quản Trị?\n\n"
+            "**Hãy chọn một trong các nút bên dưới để mở kênh trò chuyện riêng tư.**\n\n"
+            "⚠️ *Lưu ý: Không tạo ticket để trêu đùa hoặc spam để tránh bị xử phạt.*"
+        ),
+        color=discord.Color.teal()
+    )
+    embed.set_footer(text="Hệ thống Ticket tự động")
+    
+    await interaction.channel.send(embed=embed, view=TicketPanelView())
+    await interaction.response.send_message("✅ Đã tạo bảng Ticket thành công!", ephemeral=True)
 
 @bot.event
 async def on_ready():
