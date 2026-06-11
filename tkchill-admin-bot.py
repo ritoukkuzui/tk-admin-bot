@@ -18,8 +18,8 @@ MEMBER_ROLE_ID = 1375110178868826142
 OWNER_ID = 856704693215166474
 MARKETPLACE_CHANNEL_ID = 1461357458252365984
 
-# KÊNH THÔNG BÁO XỬ PHẠT MỚI (THAY ID VÀO ĐÂY)
-ANNOUNCEMENT_CHANNEL_ID = 1511395838264610897 # Thay bằng ID của kênh bot-announcements
+# KÊNH THÔNG BÁO XỬ PHẠT MỚI
+ANNOUNCEMENT_CHANNEL_ID = 123456789012345678 # Thay bằng ID của kênh bot-announcements
 
 # --- CẤU HÌNH TICKET ---
 TICKET_CATEGORY_ID = 1511235041781350511 
@@ -113,30 +113,31 @@ def has_permission(interaction: discord.Interaction) -> bool:
     user_role_names = [role.name for role in interaction.user.roles]
     return any(role_name in user_role_names for role_name in ALLOWED_ROLES)
 
-# === HÀM GỬI THÔNG BÁO XỬ PHẠT (MỚI THÊM) ===
-async def send_punishment_log(guild: discord.Guild, moderator: discord.Member, target: discord.Member, action: str, reason: str, duration: str = None):
-    # Ưu tiên lấy theo ID bạn cấu hình
+# === HÀM GỬI THÔNG BÁO XỬ PHẠT (ĐÃ ẨN DANH ADMIN & FIX LỖI REASON) ===
+async def send_punishment_log(guild: discord.Guild, target: discord.Member, action: str, reason: str, duration: str = None):
     channel = guild.get_channel(ANNOUNCEMENT_CHANNEL_ID)
-    
-    # Nếu quên cài ID, dự phòng bằng cách tìm tên kênh
     if not channel:
         channel = discord.utils.get(guild.text_channels, name="bot-announcements")
 
     if channel:
         embed = discord.Embed(
             title="🚨 THÔNG BÁO XỬ PHẠT",
-            description=f"Một thành viên vừa bị xử lý bởi Ban Quản Trị.",
+            description=f"Một thành viên vừa bị xử lý vì vi phạm quy định.",
             color=discord.Color.red(),
             timestamp=datetime.datetime.now()
         )
         embed.add_field(name="Thành viên vi phạm", value=target.mention, inline=True)
-        embed.add_field(name="Người xử lý", value=moderator.mention, inline=True)
         embed.add_field(name="Hình thức", value=action, inline=True)
         
         if duration:
             embed.add_field(name="Thời gian", value=duration, inline=True)
             
-        embed.add_field(name="Lý do", value=reason, inline=False)
+        # Xử lý an toàn cho reason (để không bị lỗi trống hoặc quá dài)
+        safe_reason = reason if (reason and len(reason.strip()) > 0) else "Không có lý do"
+        if len(safe_reason) > 1024:
+            safe_reason = safe_reason[:1021] + "..."
+            
+        embed.add_field(name="Lý do", value=safe_reason, inline=False)
         embed.set_thumbnail(url=target.avatar.url if target.avatar else None)
         
         await channel.send(content=f"📢 {target.mention} đã bị xử phạt!", embed=embed)
@@ -195,22 +196,21 @@ class PublicVoteView(discord.ui.View):
             res_embed.color = discord.Color.red()
             res_embed.description = f"✅ **THÔNG QUA!**\n👍 Đồng ý: {agrees}\n👎 Phản đối: {disagrees}"
             try:
-                # Tìm ai đó để làm đại diện moderator cho log vote, lấy chủ bot hoặc giả mạo
                 guild = channel.guild
-                bot_member = guild.me
-
+                audit_reason = f"Vote: {self.reason}"[:500]
+                
                 if self.action == "KICK":
-                    await self.target.kick(reason=f"Vote: {self.reason}")
+                    await self.target.kick(reason=audit_reason)
                     await channel.send(f"👋 Đã Kick {self.target.mention}.")
-                    await send_punishment_log(guild, bot_member, self.target, "Kick (Vote)", f"Vote: {self.reason}")
+                    await send_punishment_log(guild, self.target, "Kick (Vote)", audit_reason)
                 elif self.action == "BAN":
-                    await self.target.ban(reason=f"Vote: {self.reason}")
+                    await self.target.ban(reason=audit_reason)
                     await channel.send(f"🚨 Đã Ban {self.target.mention}.")
-                    await send_punishment_log(guild, bot_member, self.target, "Ban (Vote)", f"Vote: {self.reason}")
+                    await send_punishment_log(guild, self.target, "Ban (Vote)", audit_reason)
                 elif self.action == "TIMEOUT":
-                    await self.target.timeout(datetime.timedelta(minutes=self.duration), reason=f"Vote: {self.reason}")
+                    await self.target.timeout(datetime.timedelta(minutes=self.duration), reason=audit_reason)
                     await channel.send(f"😶 Đã Timeout {self.target.mention} trong {self.duration} phút.")
-                    await send_punishment_log(guild, bot_member, self.target, "Timeout (Vote)", f"Vote: {self.reason}", f"{self.duration} phút")
+                    await send_punishment_log(guild, self.target, "Timeout (Vote)", audit_reason, f"{self.duration} phút")
             except Exception as e:
                 await channel.send(f"⚠️ Lỗi thực thi: {e}")
         else:
@@ -409,7 +409,11 @@ class AdminApprovalView(discord.ui.View):
         embed = discord.Embed(title="⚖️ TÒA ÁN CỘNG ĐỒNG (VOTE KICK)", description="Mọi người hãy bỏ phiếu công tâm!", color=discord.Color.orange())
         embed.add_field(name="Bị cáo", value=self.target.mention, inline=True)
         embed.add_field(name="Đề nghị", value=action_desc, inline=True)
-        embed.add_field(name="Lý do", value=self.reason, inline=False)
+        
+        safe_reason = self.reason if (self.reason and len(self.reason.strip()) > 0) else "Không có lý do"
+        if len(safe_reason) > 1024: safe_reason = safe_reason[:1021] + "..."
+        embed.add_field(name="Lý do", value=safe_reason, inline=False)
+        
         embed.add_field(name="Kết thúc", value=f"<t:{future_timestamp}:R>", inline=True)
         
         vote_view = PublicVoteView(self.target, self.action, self.reason, self.duration, self.requester.id)
@@ -429,7 +433,7 @@ class ReasonModal(discord.ui.Modal, title="Nhập lý do xử lý"):
     def __init__(self, target: discord.Member, action: str):
         super().__init__()
         self.target, self.action = target, action
-    reason_input = discord.ui.TextInput(label="Lý do", style=discord.TextStyle.paragraph, required=True)
+    reason_input = discord.ui.TextInput(label="Lý do", style=discord.TextStyle.paragraph, required=True, max_length=1000)
     async def on_submit(self, interaction: discord.Interaction):
         await send_to_admin(interaction, self.target, self.action, self.reason_input.value, 0)
 
@@ -437,7 +441,7 @@ class TimeoutModal(discord.ui.Modal, title="Chi tiết Timeout"):
     def __init__(self, target: discord.Member):
         super().__init__()
         self.target = target
-    reason_input = discord.ui.TextInput(label="Lý do", style=discord.TextStyle.paragraph, required=True)
+    reason_input = discord.ui.TextInput(label="Lý do", style=discord.TextStyle.paragraph, required=True, max_length=1000)
     time_input = discord.ui.TextInput(label="Thời gian (Phút)", placeholder="Ví dụ: 60", required=True, max_length=5)
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -452,7 +456,11 @@ async def send_to_admin(interaction, target, action, reason, duration):
     embed.add_field(name="Người yêu cầu", value=interaction.user.mention, inline=True)
     embed.add_field(name="Đối tượng", value=target.mention, inline=True)
     embed.add_field(name="Hành động", value=f"**{action}**" + (f" ({duration} phút)" if action == "TIMEOUT" else ""), inline=False)
-    embed.add_field(name="Lý do", value=reason, inline=False)
+    
+    safe_reason = reason if (reason and len(reason.strip()) > 0) else "Không có lý do"
+    if len(safe_reason) > 1024: safe_reason = safe_reason[:1021] + "..."
+    embed.add_field(name="Lý do", value=safe_reason, inline=False)
+    
     await admin_channel.send(embed=embed, view=AdminApprovalView(interaction.user, target, action, reason, duration))
     await interaction.response.send_message("✅ Đã gửi đơn lên Admin.", ephemeral=True)
 
@@ -521,11 +529,12 @@ async def ban_time(interaction: discord.Interaction, member: discord.Member, min
     try:
         roles_to_remove = [role for role in member.roles if role.name != "@everyone"]
         await member.remove_roles(*roles_to_remove, reason="Ban tạm thời")
-        await member.add_roles(ban_role, reason=f"{reason} - {minutes} phút")
+        audit_reason = f"{reason} - {minutes} phút"[:500] # Tránh lỗi dài quá 512 ký tự của discord audit log
+        await member.add_roles(ban_role, reason=audit_reason)
         await interaction.response.send_message(f"🚨 Đã tước quyền {member.mention} trong **{minutes} phút**.")
         
-        # --- GỌI HÀM LOG XỬ PHẠT ---
-        await send_punishment_log(interaction.guild, interaction.user, member, "Ban Tạm Thời (Role)", reason, f"{minutes} phút")
+        # --- GỌI HÀM LOG XỬ PHẠT (Không truyền Admin vào nữa) ---
+        await send_punishment_log(interaction.guild, member, "Ban Tạm Thời (Role)", reason, f"{minutes} phút")
 
     except discord.Forbidden:
         return await interaction.response.send_message("❌ Bot không đủ quyền.", ephemeral=True)
@@ -561,11 +570,11 @@ async def unrole(interaction: discord.Interaction, member: discord.Member, role:
 @app_commands.default_permissions(moderate_members=True)
 @app_commands.checks.has_any_role(*ALLOWED_ROLES)
 async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "Không có lý do"):
-    await member.kick(reason=reason)
+    await member.kick(reason=reason[:500])
     await interaction.response.send_message(f"👋 Đã kick {member.name}. Lý do: {reason}")
     
     # --- GỌI HÀM LOG XỬ PHẠT ---
-    await send_punishment_log(interaction.guild, interaction.user, member, "Kick (Đuổi)", reason)
+    await send_punishment_log(interaction.guild, member, "Kick (Đuổi)", reason)
 
 @bot.tree.command(name="ban", description="Tước mọi quyền (Ban mềm bằng Role)")
 @app_commands.default_permissions(moderate_members=True)
@@ -575,11 +584,11 @@ async def ban_member(interaction: discord.Interaction, member: discord.Member, r
     try:
         roles_to_remove = [role for role in member.roles if role.name != "@everyone"]
         await member.remove_roles(*roles_to_remove)
-        await member.add_roles(ban_role, reason=reason)
+        await member.add_roles(ban_role, reason=reason[:500])
         await interaction.response.send_message(f"🚨 Đã tước quyền hoàn toàn (BAN MỀM) {member.mention}.")
         
         # --- GỌI HÀM LOG XỬ PHẠT ---
-        await send_punishment_log(interaction.guild, interaction.user, member, "Ban Mềm (Tước quyền)", reason)
+        await send_punishment_log(interaction.guild, member, "Ban Mềm (Tước quyền)", reason)
 
     except Exception as e: 
         await interaction.response.send_message(f"❌ Lỗi: {e}", ephemeral=True)
@@ -611,11 +620,11 @@ async def userinfo(interaction: discord.Interaction, member: discord.Member):
 @app_commands.checks.has_any_role(*ALLOWED_ROLES)
 async def mute_member(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "Không có lý do"):
     try:
-        await member.timeout(datetime.timedelta(minutes=minutes), reason=reason)
+        await member.timeout(datetime.timedelta(minutes=minutes), reason=reason[:500])
         await interaction.response.send_message(f"😶 Đã cấm chat {member.mention} trong **{minutes} phút**.\n📝 Lý do: {reason}")
         
         # --- GỌI HÀM LOG XỬ PHẠT ---
-        await send_punishment_log(interaction.guild, interaction.user, member, "Timeout (Cấm chat)", reason, f"{minutes} phút")
+        await send_punishment_log(interaction.guild, member, "Timeout (Cấm chat)", reason, f"{minutes} phút")
 
     except discord.Forbidden:
         await interaction.response.send_message("❌ Bot không đủ quyền Timeout (Role của họ cao hơn bot).", ephemeral=True)
@@ -625,7 +634,7 @@ async def mute_member(interaction: discord.Interaction, member: discord.Member, 
 @app_commands.checks.has_any_role(*ALLOWED_ROLES)
 async def unmute_member(interaction: discord.Interaction, member: discord.Member, reason: str = "Đã được gỡ cấm chat"):
     try:
-        await member.timeout(None, reason=reason)
+        await member.timeout(None, reason=reason[:500])
         await interaction.response.send_message(f"🔊 Đã gỡ cấm chat cho {member.mention}.")
     except discord.Forbidden:
         await interaction.response.send_message("❌ Bot không đủ quyền.", ephemeral=True)
