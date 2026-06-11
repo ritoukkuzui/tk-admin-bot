@@ -113,8 +113,8 @@ def has_permission(interaction: discord.Interaction) -> bool:
     user_role_names = [role.name for role in interaction.user.roles]
     return any(role_name in user_role_names for role_name in ALLOWED_ROLES)
 
-# === HÀM GỬI THÔNG BÁO XỬ PHẠT (ĐÃ ẨN DANH ADMIN & FIX LỖI REASON) ===
-async def send_punishment_log(guild: discord.Guild, target: discord.Member, action: str, reason: str, duration: str = None):
+# === HÀM GỬI THÔNG BÁO XỬ PHẠT (ĐÃ CẬP NHẬT TRẢ VỀ TIN NHẮN & HIỂN THỊ GIỜ HẾT HẠN) ===
+async def send_punishment_log(guild: discord.Guild, target: discord.Member, action: str, reason: str, duration: str = None, duration_minutes: int = None):
     channel = guild.get_channel(ANNOUNCEMENT_CHANNEL_ID)
     if not channel:
         channel = discord.utils.get(guild.text_channels, name="bot-announcements")
@@ -126,13 +126,18 @@ async def send_punishment_log(guild: discord.Guild, target: discord.Member, acti
             color=discord.Color.red(),
             timestamp=datetime.datetime.now()
         )
-        embed.add_field(name="Thành viên vi phạm", value=target.mention, inline=True)
+        embed.add_field(name="Thành viên", value=target.mention, inline=True)
         embed.add_field(name="Hình thức", value=action, inline=True)
         
         if duration:
-            embed.add_field(name="Thời gian", value=duration, inline=True)
+            # Nếu có thời gian phạt, sử dụng tag hiển thị giờ/đếm ngược của Discord
+            if duration_minutes:
+                end_timestamp = int(datetime.datetime.now().timestamp() + (duration_minutes * 60))
+                time_display = f"{duration}\n**Hết hạn:** <t:{end_timestamp}:t> (<t:{end_timestamp}:R>)"
+            else:
+                time_display = duration
+            embed.add_field(name="Thời gian", value=time_display, inline=True)
             
-        # Xử lý an toàn cho reason (để không bị lỗi trống hoặc quá dài)
         safe_reason = reason if (reason and len(reason.strip()) > 0) else "Không có lý do"
         if len(safe_reason) > 1024:
             safe_reason = safe_reason[:1021] + "..."
@@ -140,7 +145,41 @@ async def send_punishment_log(guild: discord.Guild, target: discord.Member, acti
         embed.add_field(name="Lý do", value=safe_reason, inline=False)
         embed.set_thumbnail(url=target.avatar.url if target.avatar else None)
         
-        await channel.send(content=f"📢 {target.mention} đã bị xử phạt!", embed=embed)
+        # Lưu tin nhắn vào biến msg và trả về để dùng cho task sửa/xoá sau này
+        msg = await channel.send(content=f"📢 {target.mention} đã bị xử phạt!", embed=embed)
+        return msg
+    return None
+
+# === HÀM TASK NGẦM ĐỂ TỰ ĐỘNG SỬA & XOÁ TIN NHẮN KHI HẾT HẠN ===
+async def handle_punishment_expiration(message: discord.Message, target: discord.Member, duration_minutes: int):
+    # 1. Đợi đến khi hết thời gian phạt
+    await asyncio.sleep(duration_minutes * 60)
+    
+    try:
+        # Lấy lại tin nhắn mới nhất từ API để tránh lỗi nếu nó lỡ bị ai đó xoá tay
+        msg = await message.channel.fetch_message(message.id)
+        
+        # Đổi màu xanh lá và sửa nội dung
+        embed = msg.embeds[0]
+        embed.title = "✅ ĐÃ HOÀN THÀNH CHẤP ÁN"
+        embed.description = f"{target.mention} đã hết thời gian xử phạt."
+        embed.color = discord.Color.green()
+        
+        # Sửa tin nhắn (không gửi tin mới)
+        await msg.edit(content=f"✅ {target.mention} đã hoàn thành án phạt!", embed=embed)
+        
+        # 2. Đợi thêm 30 phút rồi dọn dẹp tin nhắn
+        await asyncio.sleep(30 * 60)
+        
+        try:
+            await msg.delete()
+        except discord.NotFound:
+            pass # Lỡ có ai tự tay xoá thì bỏ qua lỗi
+            
+    except discord.NotFound:
+        pass # Tin nhắn đã bị xoá ngay từ trong lúc đang phạt
+    except Exception as e:
+        print(f"Lỗi khi sửa/xoá thông báo phạt: {e}")
 
 # ==============================================================================
 #                        HỆ THỐNG VOTE KICK (TẤT CẢ ĐỀU THẤY)
@@ -210,7 +249,11 @@ class PublicVoteView(discord.ui.View):
                 elif self.action == "TIMEOUT":
                     await self.target.timeout(datetime.timedelta(minutes=self.duration), reason=audit_reason)
                     await channel.send(f"😶 Đã Timeout {self.target.mention} trong {self.duration} phút.")
-                    await send_punishment_log(guild, self.target, "Timeout (Vote)", audit_reason, f"{self.duration} phút")
+                    
+                    # Gửi log và gọi đếm ngược
+                    msg = await send_punishment_log(guild, self.target, "Timeout (Vote)", audit_reason, f"{self.duration} phút", duration_minutes=self.duration)
+                    if msg:
+                        bot.loop.create_task(handle_punishment_expiration(msg, self.target, self.duration))
             except Exception as e:
                 await channel.send(f"⚠️ Lỗi thực thi: {e}")
         else:
@@ -587,8 +630,12 @@ async def ban_member(interaction: discord.Interaction, member: discord.Member, r
         await member.add_roles(ban_role, reason=reason[:500])
         await interaction.response.send_message(f"🚨 Đã tước quyền hoàn toàn (BAN MỀM) {member.mention}.")
         
-        # --- GỌI HÀM LOG XỬ PHẠT ---
-        await send_punishment_log(interaction.guild, member, "Ban Mềm (Tước quyền)", reason)
+       # --- GỌI HÀM LOG XỬ PHẠT (Không truyền Admin vào nữa) ---
+        msg = await send_punishment_log(interaction.guild, member, "Ban Tạm Thời (Role)", reason, f"{minutes} phút", duration_minutes=minutes)
+        
+        # Khởi chạy bộ đếm ngược ngầm
+        if msg:
+            bot.loop.create_task(handle_punishment_expiration(msg, member, minutes))
 
     except Exception as e: 
         await interaction.response.send_message(f"❌ Lỗi: {e}", ephemeral=True)
@@ -624,7 +671,11 @@ async def mute_member(interaction: discord.Interaction, member: discord.Member, 
         await interaction.response.send_message(f"😶 Đã cấm chat {member.mention} trong **{minutes} phút**.\n📝 Lý do: {reason}")
         
         # --- GỌI HÀM LOG XỬ PHẠT ---
-        await send_punishment_log(interaction.guild, member, "Timeout (Cấm chat)", reason, f"{minutes} phút")
+        msg = await send_punishment_log(interaction.guild, member, "Timeout (Cấm chat)", reason, f"{minutes} phút", duration_minutes=minutes)
+        
+        # Khởi chạy bộ đếm ngược ngầm
+        if msg:
+            bot.loop.create_task(handle_punishment_expiration(msg, member, minutes))
 
     except discord.Forbidden:
         await interaction.response.send_message("❌ Bot không đủ quyền Timeout (Role của họ cao hơn bot).", ephemeral=True)
