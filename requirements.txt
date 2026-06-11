@@ -1,2 +1,5 @@
+discord.py
+aiohttp
+python-dateutil
 motor==3.4.0
 pymongo==4.6.3
