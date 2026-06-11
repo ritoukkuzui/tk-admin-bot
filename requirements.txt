@@ -1,3 +1,4 @@
 discord.py
 aiohttp
 python-dateutil
+motor==3.3.2
