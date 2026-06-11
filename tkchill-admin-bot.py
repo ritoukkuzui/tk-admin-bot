@@ -7,6 +7,8 @@ import os
 import json  # THÊM THƯ VIỆN JSON ĐỂ LƯU SỐ TICKET
 from aiohttp import web
 import aiohttp
+import motor.motor_asyncio
+from pymongo import ReturnDocument
 
 # --- CẤU HÌNH (BẠN CẦN ĐIỀN ĐÚNG ID VÀO ĐÂY) ---
 TOKEN = os.environ.get("DISCORD_TOKEN")
@@ -32,22 +34,29 @@ VOTE_DURATION = 900  # 15 phút
 MIN_VOTES_REQUIRED = 4
 ALLOWED_ROLES = ["Admin", "DEV", "STAFF"]
 
-# File lưu trữ bộ đếm ticket
-COUNTER_FILE = "ticket_counter.json"
+# --- KẾT NỐI MONGODB ATLAS ---
+# Tận dụng luôn cái Database của con Bot 1
+MONGO_URI = os.environ.get("MONGO_URI")
+db_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
+db = db_client["tkchill_database"] 
+ticket_collection = db["ticket_counter"]
 
-# --- HÀM TỰ ĐỘNG ĐÁNH SỐ TICKET ---
-def get_next_ticket_number() -> str:
+# --- HÀM TỰ ĐỘNG ĐÁNH SỐ TICKET (ĐÃ NÂNG CẤP LÊN MONGODB) ---
+async def get_next_ticket_number() -> str:
     try:
-        with open(COUNTER_FILE, "r") as f:
-            data = json.load(f)
-            counter = data.get("counter", 0) + 1
-    except (FileNotFoundError, json.JSONDecodeError):
-        counter = 1
-    
-    with open(COUNTER_FILE, "w") as f:
-        json.dump({"counter": counter}, f)
-    
-    return f"{counter:03d}" # Định dạng 3 chữ số (001, 002, 003...)
+        # Lệnh $inc giúp tự động cộng 1 cực kỳ an toàn
+        # Đảm bảo không bao giờ bị trùng số dù có 10 người mở ticket cùng lúc
+        doc = await ticket_collection.find_one_and_update(
+            {"_id": "master_ticket"},
+            {"$inc": {"counter": 1}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER
+        )
+        counter = doc.get("counter", 1)
+        return f"{counter:03d}"
+    except Exception as e:
+        print(f"❌ Lỗi lấy số Ticket từ MongoDB: {e}")
+        return "999" # Số dự phòng chống sập bot nếu rớt mạng
 
 # Thiết lập Intents
 intents = discord.Intents.default()
@@ -352,7 +361,7 @@ class TicketPanelView(discord.ui.View):
         await interaction.response.defer(ephemeral=True) 
 
         # --- ĐÁNH SỐ TỰ ĐỘNG THEO YÊU CẦU ---
-        ticket_num = get_next_ticket_number()
+        ticket_num = await get_next_ticket_number()
         channel_name = f"{interaction.user.name}-ticket-{ticket_num}"
         
         ticket_channel = await guild.create_text_channel(
