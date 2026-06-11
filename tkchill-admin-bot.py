@@ -40,6 +40,7 @@ MONGO_URI = os.environ.get("MONGO_URI")
 db_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
 db = db_client["tkchill_database"] 
 ticket_collection = db["ticket_counter"]
+punishment_collection = db["punishment_logs"]
 
 # --- HÀM TỰ ĐỘNG ĐÁNH SỐ TICKET (ĐÃ NÂNG CẤP LÊN MONGODB) ---
 async def get_next_ticket_number() -> str:
@@ -91,6 +92,7 @@ class MyBot(commands.Bot):
         print(">> Đã đồng bộ tất cả lệnh Slash Commands!")
         
         bot.loop.create_task(start_web_server())
+        check_punishments.start()
         self.ping_bot1.start()
 
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -159,36 +161,63 @@ async def send_punishment_log(guild: discord.Guild, target: discord.Member, acti
         return msg
     return None
 
-# === HÀM TASK NGẦM ĐỂ TỰ ĐỘNG SỬA & XOÁ TIN NHẮN KHI HẾT HẠN ===
-async def handle_punishment_expiration(message: discord.Message, target: discord.Member, duration_minutes: int):
-    # 1. Đợi đến khi hết thời gian phạt
-    await asyncio.sleep(duration_minutes * 60)
+# === HỆ THỐNG KIỂM TRA ÁN PHẠT TỰ ĐỘNG BẰNG MONGODB ===
+@tasks.loop(minutes=1.0)
+async def check_punishments():
+    now = datetime.datetime.now().timestamp()
     
-    try:
-        # Lấy lại tin nhắn mới nhất từ API để tránh lỗi nếu nó lỡ bị ai đó xoá tay
-        msg = await message.channel.fetch_message(message.id)
+    cursor = punishment_collection.find({"status": "active", "expire_at": {"$lte": now}})
+    async for doc in cursor:
+        target_id = doc['target_id']
+        action_type = doc.get('action_type', 'timeout')
         
-        # Đổi màu xanh lá và sửa nội dung
-        embed = msg.embeds[0]
-        embed.title = "✅ ĐÃ HOÀN THÀNH CHẤP ÁN"
-        embed.description = f"{target.mention} đã hết thời gian xử phạt."
-        embed.color = discord.Color.green()
-        
-        # Sửa tin nhắn (không gửi tin mới)
-        await msg.edit(content=f"✅ {target.mention} đã hoàn thành án phạt!", embed=embed)
-        
-        # 2. Đợi thêm 30 phút rồi dọn dẹp tin nhắn
-        await asyncio.sleep(30 * 60)
-        
+        # 1. TRẢ LẠI ROLE NẾU ĐÂY LÀ PHẠT "BAN_TIME"
+        if action_type == "soft_ban":
+            try:
+                guild = bot.get_guild(GUILD_ID)
+                if guild:
+                    target_member = guild.get_member(target_id)
+                    ban_role = guild.get_role(BAN_ROLE_ID)
+                    member_role = guild.get_role(MEMBER_ROLE_ID)
+                    if target_member and ban_role in target_member.roles:
+                        await target_member.remove_roles(ban_role)
+                        await target_member.add_roles(member_role)
+            except Exception as e:
+                print(f"Lỗi trả role: {e}")
+
+        # 2. SỬA TIN NHẮN LOG
         try:
-            await msg.delete()
-        except discord.NotFound:
-            pass # Lỡ có ai tự tay xoá thì bỏ qua lỗi
+            channel = bot.get_channel(doc["channel_id"]) or await bot.fetch_channel(doc["channel_id"])
+            msg = await channel.fetch_message(doc["message_id"])
             
-    except discord.NotFound:
-        pass # Tin nhắn đã bị xoá ngay từ trong lúc đang phạt
-    except Exception as e:
-        print(f"Lỗi khi sửa/xoá thông báo phạt: {e}")
+            embed = msg.embeds[0]
+            embed.title = "✅ ĐÃ HOÀN THÀNH CHẤP ÁN"
+            embed.description = f"<@{target_id}> đã hết thời gian xử phạt."
+            embed.color = discord.Color.green()
+            
+            await msg.edit(content=f"✅ <@{target_id}> đã hoàn thành án phạt!", embed=embed)
+        except Exception:
+            pass 
+        
+        await punishment_collection.update_one(
+            {"_id": doc["_id"]},
+            {"$set": {"status": "completed", "delete_at": now + (30 * 60)}}
+        )
+        
+    # Xóa tin nhắn rác
+    cursor_del = punishment_collection.find({"status": "completed", "delete_at": {"$lte": now}})
+    async for doc in cursor_del:
+        try:
+            channel = bot.get_channel(doc["channel_id"]) or await bot.fetch_channel(doc["channel_id"])
+            msg = await channel.fetch_message(doc["message_id"])
+            await msg.delete()
+        except:
+            pass
+        await punishment_collection.delete_one({"_id": doc["_id"]})
+
+@check_punishments.before_loop
+async def before_check_punishments():
+    await bot.wait_until_ready()
 
 # ==============================================================================
 #                        HỆ THỐNG VOTE KICK (TẤT CẢ ĐỀU THẤY)
@@ -259,10 +288,20 @@ class PublicVoteView(discord.ui.View):
                     await self.target.timeout(datetime.timedelta(minutes=self.duration), reason=audit_reason)
                     await channel.send(f"😶 Đã Timeout {self.target.mention} trong {self.duration} phút.")
                     
-                    # Gửi log và gọi đếm ngược
+                    # Gửi log
                     msg = await send_punishment_log(guild, self.target, "Timeout (Vote)", audit_reason, f"{self.duration} phút", duration_minutes=self.duration)
+                    
+                    # Lưu MongoDB
                     if msg:
-                        bot.loop.create_task(handle_punishment_expiration(msg, self.target, self.duration))
+                        expire_time = datetime.datetime.now().timestamp() + (self.duration * 60)
+                        await punishment_collection.insert_one({
+                            "message_id": msg.id,
+                            "channel_id": msg.channel.id,
+                            "target_id": self.target.id,
+                            "expire_at": expire_time,
+                            "action_type": "timeout", # Đánh dấu loại phạt
+                            "status": "active"
+                        })
             except Exception as e:
                 await channel.send(f"⚠️ Lỗi thực thi: {e}")
         else:
@@ -581,24 +620,26 @@ async def ban_time(interaction: discord.Interaction, member: discord.Member, min
     try:
         roles_to_remove = [role for role in member.roles if role.name != "@everyone"]
         await member.remove_roles(*roles_to_remove, reason="Ban tạm thời")
-        audit_reason = f"{reason} - {minutes} phút"[:500] # Tránh lỗi dài quá 512 ký tự của discord audit log
+        audit_reason = f"{reason} - {minutes} phút"[:500]
         await member.add_roles(ban_role, reason=audit_reason)
         await interaction.response.send_message(f"🚨 Đã tước quyền {member.mention} trong **{minutes} phút**.")
         
-        # --- GỌI HÀM LOG XỬ PHẠT (Không truyền Admin vào nữa) ---
-        await send_punishment_log(interaction.guild, member, "Ban Tạm Thời (Role)", reason, f"{minutes} phút")
+        msg = await send_punishment_log(interaction.guild, member, "Ban Tạm Thời (Role)", reason, f"{minutes} phút", duration_minutes=minutes)
+        
+        # --- LƯU MONGODB ĐỂ VÒNG LẶP XỬ LÝ UNBAN ---
+        if msg:
+            expire_time = datetime.datetime.now().timestamp() + (minutes * 60)
+            await punishment_collection.insert_one({
+                "message_id": msg.id,
+                "channel_id": msg.channel.id,
+                "target_id": member.id,
+                "expire_at": expire_time,
+                "action_type": "soft_ban", # Phải báo cho DB biết đây là tước Role
+                "status": "active"
+            })
 
     except discord.Forbidden:
         return await interaction.response.send_message("❌ Bot không đủ quyền.", ephemeral=True)
-    
-    await asyncio.sleep(minutes * 60)
-    try:
-        member_refetched = interaction.guild.get_member(member.id) 
-        if member_refetched and ban_role in member_refetched.roles:
-            await member_refetched.remove_roles(ban_role)
-            await member_refetched.add_roles(member_role)
-            await interaction.channel.send(f"✅ {member_refetched.mention} đã hết thời hạn phạt.")
-    except Exception as e: print(f"Lỗi unban: {e}")
 
 @bot.tree.command(name="giverole", description="Trao role cho thành viên")
 @app_commands.default_permissions(moderate_members=True)
@@ -639,13 +680,9 @@ async def ban_member(interaction: discord.Interaction, member: discord.Member, r
         await member.add_roles(ban_role, reason=reason[:500])
         await interaction.response.send_message(f"🚨 Đã tước quyền hoàn toàn (BAN MỀM) {member.mention}.")
         
-       # --- GỌI HÀM LOG XỬ PHẠT (Không truyền Admin vào nữa) ---
-        msg = await send_punishment_log(interaction.guild, member, "Ban Tạm Thời (Role)", reason, f"{minutes} phút", duration_minutes=minutes)
+        # --- GHI LOG (Không có phút, không lưu MongoDB vì đây là ban vĩnh viễn) ---
+        await send_punishment_log(interaction.guild, member, "Ban Mềm (Role)", reason)
         
-        # Khởi chạy bộ đếm ngược ngầm
-        if msg:
-            bot.loop.create_task(handle_punishment_expiration(msg, member, minutes))
-
     except Exception as e: 
         await interaction.response.send_message(f"❌ Lỗi: {e}", ephemeral=True)
 
@@ -679,12 +716,18 @@ async def mute_member(interaction: discord.Interaction, member: discord.Member, 
         await member.timeout(datetime.timedelta(minutes=minutes), reason=reason[:500])
         await interaction.response.send_message(f"😶 Đã cấm chat {member.mention} trong **{minutes} phút**.\n📝 Lý do: {reason}")
         
-        # --- GỌI HÀM LOG XỬ PHẠT ---
         msg = await send_punishment_log(interaction.guild, member, "Timeout (Cấm chat)", reason, f"{minutes} phút", duration_minutes=minutes)
         
-        # Khởi chạy bộ đếm ngược ngầm
         if msg:
-            bot.loop.create_task(handle_punishment_expiration(msg, member, minutes))
+            expire_time = datetime.datetime.now().timestamp() + (minutes * 60)
+            await punishment_collection.insert_one({
+                "message_id": msg.id,
+                "channel_id": msg.channel.id,
+                "target_id": member.id,
+                "expire_at": expire_time,
+                "action_type": "timeout",
+                "status": "active"
+            })
 
     except discord.Forbidden:
         await interaction.response.send_message("❌ Bot không đủ quyền Timeout (Role của họ cao hơn bot).", ephemeral=True)
