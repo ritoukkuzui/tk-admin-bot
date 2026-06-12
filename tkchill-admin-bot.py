@@ -10,7 +10,7 @@ import aiohttp
 import motor.motor_asyncio
 from pymongo import ReturnDocument
 
-# --- CẤU HÌNH (BẠN CẦN ĐIỀN ĐÚNG ID VÀO ĐÂY) ---
+# --- CẤU HÌNH (BẠ sN CẦN ĐIỀN ĐÚNG ID VÀO ĐÂY) ---
 TOKEN = os.environ.get("DISCORD_TOKEN")
 GUILD_ID = 1365693391668777051
 ADMIN_CHANNEL_ID = 1448258683627638895
