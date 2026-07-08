@@ -312,65 +312,6 @@ class PublicVoteView(discord.ui.View):
             try: await self.message.edit(view=None, embed=res_embed)
             except: pass
 
-# ==============================================================================
-#                         HỆ THỐNG TICKET HỖ TRỢ (ĐÃ CẬP NHẬT LOG)
-# ==============================================================================
-
-class TicketControlView(discord.ui.View):
-    def __init__(self, creator: discord.Member):
-        super().__init__(timeout=None)
-        self.creator = creator
-
-    @discord.ui.button(label="Vấn đề đã giải quyết", style=discord.ButtonStyle.green, emoji="✅", custom_id="ticket_resolved")
-    async def resolve_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not has_permission(interaction) and interaction.user.id != self.creator.id:
-            return await interaction.response.send_message("❌ Bạn không có quyền đóng ticket này!", ephemeral=True)
-            
-        await interaction.response.send_message("🔄 Đang xử lý đóng ticket...", ephemeral=True)
-        
-        # --- GỬI LOG VÀO KÊNH ADMIN KHI ĐÓNG TICKET ---
-        admin_channel = interaction.guild.get_channel(ADMIN_CHANNEL_ID)
-        if admin_channel:
-            log_embed = discord.Embed(
-                title="🔒 TICKET ĐÃ GIẢI QUYẾT",
-                description=f"📌 **Tên phòng:** `{interaction.channel.name}`\n👤 **Người tạo:** {self.creator.mention} (`{self.creator.name}`)\n🔒 **Người đóng:** {interaction.user.mention} (`{interaction.user.name}`)",
-                color=discord.Color.blue(),
-                timestamp=datetime.datetime.now()
-            )
-            await admin_channel.send(embed=log_embed)
-
-        try:
-            await self.creator.send(f"✅ Ticket hỗ trợ của bạn tại server **{interaction.guild.name}** đã được đánh dấu là **Đã Giải Quyết** và đóng lại bởi {interaction.user.name}.")
-        except discord.Forbidden:
-            pass
-            
-        await interaction.channel.delete(reason="Ticket đã được giải quyết.")
-
-    @discord.ui.button(label="Hủy Ticket", style=discord.ButtonStyle.red, emoji="🗑️", custom_id="ticket_cancel")
-    async def cancel_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not has_permission(interaction) and interaction.user.id != self.creator.id:
-            return await interaction.response.send_message("❌ Bạn không có quyền hủy ticket này!", ephemeral=True)
-
-        await interaction.response.send_message("🔄 Đang hủy ticket...", ephemeral=True)
-        
-        # --- GỬI LOG VÀO KÊNH ADMIN KHI HỦY TICKET ---
-        admin_channel = interaction.guild.get_channel(ADMIN_CHANNEL_ID)
-        if admin_channel:
-            log_embed = discord.Embed(
-                title="❌ TICKET BỊ HỦY",
-                description=f"📌 **Tên phòng:** `{interaction.channel.name}`\n👤 **Người tạo:** {self.creator.mention} (`{self.creator.name}`)\n❌ **Người hủy:** {interaction.user.mention} (`{interaction.user.name}`)",
-                color=discord.Color.red(),
-                timestamp=datetime.datetime.now()
-            )
-            await admin_channel.send(embed=log_embed)
-
-        try:
-            await self.creator.send(f"❌ Ticket của bạn tại server **{interaction.guild.name}** đã bị **Hủy/Từ chối** bởi {interaction.user.name}.")
-        except discord.Forbidden:
-            pass
-
-        await interaction.channel.delete(reason="Ticket bị hủy.")
-
 
 # ==============================================================================
 # HỆ THỐNG TICKET HỖ TRỢ (ĐÃ NÂNG CẤP SELECT MENU & MODAL)
