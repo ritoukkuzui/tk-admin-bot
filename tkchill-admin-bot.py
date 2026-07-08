@@ -375,7 +375,7 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
 
     # --- NỘI DUNG GỬI VÀO TRONG KÊNH TICKET ---
     embed = discord.Embed(
-        title=f"🛠️ Yêu cầu hỗ trợ: {ticket_type}",
+        title=f"🛠️ Yêu cầu: {ticket_type}",
         color=discord.Color.blue()
     )
     
@@ -391,17 +391,21 @@ async def create_ticket_channel(interaction: discord.Interaction, ticket_type: s
     embed.description = desc
     embed.set_footer(text="Sử dụng các nút bên dưới để đóng ticket khi xong việc.")
     
-    # Chuẩn bị lời Ping
-    ping_msg = f"🔔 "
+    # --- CHUẨN BỊ LỜI PING ĐỘNG THEO LOẠI TICKET ---
+    ping_roles = ""
     for role in [admin_role, dev_role, staff_role]:
-        if role: ping_msg += f"{role.mention} "
-    ping_msg += f"\n{interaction.user.mention} vừa tạo một yêu cầu mới!"
-    
-    # Cực kỳ quan trọng: Ở đây bot sẽ tag người bị tố cáo để Admin thấy,
-    # NHƯNG người đó sẽ không đọc được tin nhắn này vì ta chưa cấp quyền ở overwrites
+        if role: 
+            ping_roles += f"{role.mention} "
+            
+    # Tùy biến nội dung ping dựa trên ticket_type
     if reported_user_id:
-        ping_msg += f"\n*(Thông báo đến Admin: Đang tố cáo người dùng <@{reported_user_id}>)*"
+        ping_msg = f"🔔 {ping_roles}\n🚨 {interaction.user.mention} đã **tố cáo** thành viên <@{reported_user_id}>!"
+    elif "Báo lỗi" in ticket_type:
+        ping_msg = f"🔔 {ping_roles}\n⚠️ {interaction.user.mention} vừa **{ticket_type}**!"
+    else:
+        ping_msg = f"🔔 {ping_roles}\n📩 {interaction.user.mention} cần **{ticket_type}**!"
         
+    # Gửi tin nhắn ping kèm Embed và View điều khiển
     await ticket_channel.send(
         content=ping_msg,
         embed=embed, 
