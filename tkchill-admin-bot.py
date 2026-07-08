@@ -372,90 +372,188 @@ class TicketControlView(discord.ui.View):
         await interaction.channel.delete(reason="Ticket bị hủy.")
 
 
+# ==============================================================================
+# HỆ THỐNG TICKET HỖ TRỢ (ĐÃ NÂNG CẤP SELECT MENU & MODAL)
+# ==============================================================================
+
+# Đưa hàm này ra ngoài làm hàm tự do để dễ dàng tái sử dụng cho Modal và Select
+async def create_ticket_channel(interaction: discord.Interaction, ticket_type: str, custom_reason: str = None, reported_user_id: str = None):
+    guild = interaction.guild
+    category = guild.get_channel(TICKET_CATEGORY_ID)
+    
+    if not category:
+        return await interaction.followup.send("❌ Lỗi hệ thống: Không tìm thấy danh mục chứa Ticket. Báo Dev ngay!", ephemeral=True)
+
+    admin_role = guild.get_role(ROLE_ADMIN_ID)
+    dev_role = guild.get_role(ROLE_DEV_ID)
+    staff_role = guild.get_role(ROLE_STAFF_ID)
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False), 
+        interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True), 
+        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True) 
+    }
+
+    for role in [admin_role, dev_role, staff_role]:
+        if role:
+            overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+
+    # ĐÁNH SỐ TỰ ĐỘNG
+    ticket_num = await get_next_ticket_number()
+    channel_name = f"{interaction.user.name}-ticket-{ticket_num}"
+    
+    ticket_channel = await guild.create_text_channel(
+        name=channel_name,
+        category=category,
+        overwrites=overwrites,
+        reason=f"Tạo ticket loại: {ticket_type} bởi {interaction.user.name}"
+    )
+
+    # --- GỬI LOG VÀO KÊNH ADMIN KHI TẠO TICKET MỚI ---
+    admin_channel = guild.get_channel(ADMIN_CHANNEL_ID)
+    if admin_channel:
+        log_embed = discord.Embed(
+            title="📩 TICKET MỚI ĐƯỢC TẠO",
+            description=f"📌 **Phòng:** {ticket_channel.mention} (`#{channel_name}`)\n👤 **Người tạo:** {interaction.user.mention} (`{interaction.user.name}`)\n📂 **Loại hỗ trợ:** {ticket_type}",
+            color=discord.Color.green(),
+            timestamp=datetime.datetime.now()
+        )
+        if reported_user_id:
+            log_embed.add_field(name="🚨 Đối tượng bị tố cáo", value=f"<@{reported_user_id}> (ID: {reported_user_id})", inline=False)
+        if custom_reason:
+            log_embed.add_field(name="📝 Lý do / Chi tiết", value=custom_reason, inline=False)
+            
+        await admin_channel.send(embed=log_embed)
+
+    try:
+        await interaction.user.send(f"💌 **Đã gửi yêu cầu!** Ticket của bạn đã được tạo thành công tại {ticket_channel.mention}. Vui lòng truy cập kênh đó và đợi Admin/Staff giải quyết nhé!")
+    except discord.Forbidden:
+        pass
+
+    await interaction.followup.send(f"✅ Đã mở ticket thành công! Hãy vào {ticket_channel.mention} để trao đổi.", ephemeral=True)
+
+    # --- NỘI DUNG GỬI VÀO TRONG KÊNH TICKET ---
+    embed = discord.Embed(
+        title=f"🛠️ Yêu cầu hỗ trợ: {ticket_type}",
+        color=discord.Color.blue()
+    )
+    
+    desc = f"Xin chào {interaction.user.mention},\n\n"
+    if reported_user_id:
+        desc += f"**🚨 Đối tượng bị báo cáo:** <@{reported_user_id}>\n"
+    if custom_reason:
+        desc += f"**📝 Chi tiết vấn đề:** {custom_reason}\n\n"
+    else:
+        desc += "Vui lòng mô tả chi tiết vấn đề của bạn ở đây.\n\n"
+        
+    desc += "Đội ngũ Ban Quản Trị sẽ phản hồi bạn sớm nhất có thể."
+    embed.description = desc
+    embed.set_footer(text="Sử dụng các nút bên dưới để đóng ticket khi xong việc.")
+    
+    # Chuẩn bị lời Ping
+    ping_msg = f"🔔 "
+    for role in [admin_role, dev_role, staff_role]:
+        if role: ping_msg += f"{role.mention} "
+    ping_msg += f"\n{interaction.user.mention} vừa tạo một yêu cầu mới!"
+    
+    # Cực kỳ quan trọng: Ở đây bot sẽ tag người bị tố cáo để Admin thấy,
+    # NHƯNG người đó sẽ không đọc được tin nhắn này vì ta chưa cấp quyền ở overwrites
+    if reported_user_id:
+        ping_msg += f"\n*(Thông báo đến Admin: Đang tố cáo người dùng <@{reported_user_id}>)*"
+        
+    await ticket_channel.send(
+        content=ping_msg,
+        embed=embed, 
+        view=TicketControlView(interaction.user)
+    )
+
+# --- 1. MODAL: TỐ CÁO THÀNH VIÊN ---
+class ReportMemberModal(discord.ui.Modal, title="Tố cáo thành viên"):
+    member_id = discord.ui.TextInput(
+        label="ID Thành viên vi phạm", 
+        placeholder="Ví dụ: 856704693215166474", 
+        required=True, 
+        max_length=25
+    )
+    reason = discord.ui.TextInput(
+        label="Hành vi vi phạm", 
+        style=discord.TextStyle.paragraph, 
+        placeholder="Mô tả rõ hành vi vi phạm của người này...", 
+        required=True, 
+        max_length=1000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        user_id = self.member_id.value.strip()
+        
+        if not user_id.isdigit():
+            return await interaction.followup.send("❌ ID thành viên không hợp lệ (ID chỉ bao gồm các chữ số).", ephemeral=True)
+            
+        await create_ticket_channel(interaction, "Báo cáo thành viên vi phạm", custom_reason=self.reason.value, reported_user_id=user_id)
+
+
+# --- 2. SELECT MENU & VIEW: BÁO LỖI BUG ---
+class BugTypeSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Lỗi Bot trong Server", description="Các lỗi liên quan đến bot Discord", emoji="🤖"),
+            discord.SelectOption(label="Lỗi Máy chủ Server", description="Lỗi kênh, roles hoặc hệ thống của server", emoji="🖥️"),
+            discord.SelectOption(label="Lỗi Web tk.chill", description="Sự cố khi sử dụng Website tk.chill", emoji="🌐"),
+            discord.SelectOption(label="Lỗi App tk.chill", description="Sự cố khi sử dụng App tk.chill", emoji="📱"),
+        ]
+        super().__init__(placeholder="Vui lòng chọn khu vực đang bị lỗi...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        selected_bug = self.values[0]
+        # Sau khi user chọn xong menu, bot tiến hành tạo ticket
+        await create_ticket_channel(interaction, f"Báo lỗi: {selected_bug}")
+
+class BugTypeView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(BugTypeSelect())
+
+
+# --- 3. MODAL: YÊU CẦU HỖ TRỢ KHÁC ---
+class OtherHelpModal(discord.ui.Modal, title="Yêu cầu hỗ trợ chung"):
+    reason = discord.ui.TextInput(
+        label="Lý do cần hỗ trợ", 
+        style=discord.TextStyle.paragraph, 
+        placeholder="Hãy mô tả ngắn gọn vấn đề bạn đang gặp phải...", 
+        required=True, 
+        max_length=1000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        await create_ticket_channel(interaction, "Yêu cầu hỗ trợ chung", custom_reason=self.reason.value)
+
+
+# --- 4. GIAO DIỆN CHÍNH CỦA BẢNG TICKET ---
 class TicketPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    async def create_ticket_channel(self, interaction: discord.Interaction, ticket_type: str):
-        guild = interaction.guild
-        category = guild.get_channel(TICKET_CATEGORY_ID)
-        
-        if not category:
-            return await interaction.response.send_message("❌ Lỗi hệ thống: Không tìm thấy danh mục chứa Ticket. Báo Dev ngay!", ephemeral=True)
-
-        admin_role = guild.get_role(ROLE_ADMIN_ID)
-        dev_role = guild.get_role(ROLE_DEV_ID)
-        staff_role = guild.get_role(ROLE_STAFF_ID)
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False), 
-            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True), 
-            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True) 
-        }
-
-        for role in [admin_role, dev_role, staff_role]:
-            if role:
-                overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-
-        await interaction.response.defer(ephemeral=True) 
-
-        # --- ĐÁNH SỐ TỰ ĐỘNG THEO YÊU CẦU ---
-        ticket_num = await get_next_ticket_number()
-        channel_name = f"{interaction.user.name}-ticket-{ticket_num}"
-        
-        ticket_channel = await guild.create_text_channel(
-            name=channel_name,
-            category=category,
-            overwrites=overwrites,
-            reason=f"Tạo ticket loại: {ticket_type} bởi {interaction.user.name}"
-        )
-
-        # --- GỬI LOG VÀO KÊNH ADMIN KHI TẠO TICKET MỚI ---
-        admin_channel = guild.get_channel(ADMIN_CHANNEL_ID)
-        if admin_channel:
-            log_embed = discord.Embed(
-                title="📩 TICKET MỚI ĐƯỢC TẠO",
-                description=f"📌 **Phòng:** {ticket_channel.mention} (`#{channel_name}`)\n👤 **Người tạo:** {interaction.user.mention} (`{interaction.user.name}`)\n📂 **Loại hỗ trợ:** {ticket_type}",
-                color=discord.Color.green(),
-                timestamp=datetime.datetime.now()
-            )
-            await admin_channel.send(embed=log_embed)
-
-        try:
-            await interaction.user.send(f"💌 **Đã gửi yêu cầu!** Ticket của bạn đã được tạo thành công tại {ticket_channel.mention}. Vui lòng truy cập kênh đó và đợi Admin/Staff giải quyết nhé!")
-        except discord.Forbidden:
-            pass
-
-        await interaction.followup.send(f"✅ Đã mở ticket thành công! Hãy vào {ticket_channel.mention} để trao đổi.", ephemeral=True)
-
-        embed = discord.Embed(
-            title=f"🛠️ Yêu cầu hỗ trợ: {ticket_type}",
-            description=f"Xin chào {interaction.user.mention},\n\nVui lòng mô tả chi tiết vấn đề của bạn ở đây. Đội ngũ Ban Quản Trị sẽ phản hồi bạn sớm nhất có thể.",
-            color=discord.Color.blue()
-        )
-        embed.set_footer(text="Sử dụng các nút bên dưới để đóng ticket khi xong việc.")
-        
-        ping_msg = ""
-        for role in [admin_role, dev_role, staff_role]:
-            if role: ping_msg += f"{role.mention} "
-            
-        await ticket_channel.send(
-            content=f"🔔 {ping_msg}\n{interaction.user.mention} vừa tạo một yêu cầu mới!",
-            embed=embed, 
-            view=TicketControlView(interaction.user)
-        )
-
     @discord.ui.button(label="Báo cáo vi phạm", style=discord.ButtonStyle.blurple, emoji="🚨", custom_id="btn_report_member")
     async def btn_report_member(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.create_ticket_channel(interaction, "Báo cáo thành viên vi phạm")
+        # Mở Modal nhập ID và lý do
+        await interaction.response.send_modal(ReportMemberModal())
 
     @discord.ui.button(label="Báo lỗi/Bug", style=discord.ButtonStyle.gray, emoji="⚠️", custom_id="btn_report_bug")
     async def btn_report_bug(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.create_ticket_channel(interaction, "Báo lỗi Server/Bot")
+        # Mở Select Menu (dạng tin nhắn ẩn)
+        await interaction.response.send_message(
+            "📌 **Bạn đang gặp lỗi ở khu vực nào?** Vui lòng chọn trong danh sách dưới đây:", 
+            view=BugTypeView(), 
+            ephemeral=True
+        )
 
     @discord.ui.button(label="Hỗ trợ khác", style=discord.ButtonStyle.green, emoji="📩", custom_id="btn_other_help")
     async def btn_other_help(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.create_ticket_channel(interaction, "Yêu cầu hỗ trợ chung")
+        # Mở Modal nhập lý do cần hỗ trợ
+        await interaction.response.send_modal(OtherHelpModal())
 
 class EditTimeModal(discord.ui.Modal, title="Sửa thời gian Timeout"):
     def __init__(self, admin_view):
