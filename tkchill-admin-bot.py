@@ -493,6 +493,29 @@ class ReportMemberModal(discord.ui.Modal, title="Tố cáo thành viên"):
 
 
 # --- 2. SELECT MENU & VIEW: BÁO LỖI BUG ---
+
+class ReportBugModal(discord.ui.Modal):
+    def __init__(self, bug_type: str):
+        # Discord giới hạn tiêu đề Modal tối đa 45 ký tự nên ta dùng [:45] để cắt bớt nếu lỡ dài quá
+        super().__init__(title=f"Báo lỗi: {bug_type}"[:45])
+        self.bug_type = bug_type
+        
+        # Tạo ô nhập liệu cho người dùng
+        self.bug_description = discord.ui.TextInput(
+            label="Mô tả chi tiết lỗi",
+            style=discord.TextStyle.paragraph, # paragraph để có khung nhập chữ to, dễ xuống dòng
+            placeholder="Bạn gặp lỗi gì, ở đâu, làm sao để tái hiện lỗi này?",
+            required=True,
+            max_length=1000
+        )
+        self.add_item(self.bug_description)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        # Truyền nội dung mô tả lỗi (bug_description.value) vào phần custom_reason
+        await create_ticket_channel(interaction, f"Báo lỗi: {self.bug_type}", custom_reason=self.bug_description.value)
+
+
 class BugTypeSelect(discord.ui.Select):
     def __init__(self):
         options = [
@@ -504,10 +527,10 @@ class BugTypeSelect(discord.ui.Select):
         super().__init__(placeholder="Vui lòng chọn khu vực đang bị lỗi...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
         selected_bug = self.values[0]
-        # Sau khi user chọn xong menu, bot tiến hành tạo ticket
-        await create_ticket_channel(interaction, f"Báo lỗi: {selected_bug}")
+        # QUAN TRỌNG: Gọi Modal ngay khi người dùng chọn xong (Không dùng defer ở đây nữa vì sẽ làm lỗi Modal)
+        await interaction.response.send_modal(ReportBugModal(selected_bug))
+
 
 class BugTypeView(discord.ui.View):
     def __init__(self):
