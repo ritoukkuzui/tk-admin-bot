@@ -171,47 +171,73 @@ async def check_punishments():
         target_id = doc['target_id']
         action_type = doc.get('action_type', 'timeout')
         
-        # 1. TRẢ LẠI ROLE NẾU ĐÂY LÀ PHẠT "BAN_TIME"
+        # 1. XỬ LÝ HẾT HẠN PHẠT "BAN_TIME"
         if action_type == "soft_ban":
             try:
                 guild = bot.get_guild(GUILD_ID)
-                if guild:
-                    target_member = guild.get_member(target_id)
-                    ban_role = guild.get_role(BAN_ROLE_ID)
-                    member_role = guild.get_role(MEMBER_ROLE_ID)
-                    if target_member and ban_role in target_member.roles:
-                        await target_member.remove_roles(ban_role)
-                        await target_member.add_roles(member_role)
-            except Exception as e:
-                print(f"Lỗi trả role: {e}")
+                if not guild:
+                    guild = await bot.fetch_guild(GUILD_ID)
 
-        # 2. SỬA TIN NHẮN LOG
+                if guild:
+                    # Dùng fetch_member để chống lỗi không tìm thấy người dùng khi Render vừa restart
+                    try:
+                        target_member = guild.get_member(target_id) or await guild.fetch_member(target_id)
+                    except discord.NotFound:
+                        target_member = None # User đã tự thoát khỏi server
+                        print(f"[Log] User {target_id} đã rời server, không thể gỡ role ban.")
+
+                    if target_member:
+                        ban_role = guild.get_role(BAN_ROLE_ID)
+                        
+                        # CHỈ gỡ role Ban, KHÔNG cấp lại role Member
+                        if ban_role and ban_role in target_member.roles:
+                            await target_member.remove_roles(ban_role, reason="Hết hạn ban tạm thời (Chưa cấp lại Role)")
+                            
+                            # Nhắn tin (DM) nhắc họ đi xin lại role
+                            try:
+                                await target_member.send(
+                                    f"✅ Án phạt ban tạm thời của bạn tại server **{guild.name}** đã hết hạn.\n"
+                                    f"⚠️ **LƯU Ý QUAN TRỌNG:** Bot không tự động cấp lại quyền thành viên. Vui lòng mở Ticket hỗ trợ hoặc liên hệ Admin/Staff để xin lại Role Member nhé!"
+                                )
+                            except discord.Forbidden:
+                                # Bỏ qua nếu người dùng khóa tính năng nhận tin nhắn từ người lạ (DM)
+                                pass
+            except Exception as e:
+                print(f"Lỗi xử lý gỡ ban cho {target_id}: {e}")
+
+        # 2. SỬA TIN NHẮN LOG TRONG KÊNH THÔNG BÁO
         try:
             channel = bot.get_channel(doc["channel_id"]) or await bot.fetch_channel(doc["channel_id"])
             msg = await channel.fetch_message(doc["message_id"])
             
             embed = msg.embeds[0]
             embed.title = "✅ ĐÃ HOÀN THÀNH CHẤP ÁN"
-            embed.description = f"<@{target_id}> đã hết thời gian xử phạt."
+            
+            if action_type == "soft_ban":
+                embed.description = f"<@{target_id}> đã hết thời gian xử phạt. Yêu cầu tự liên hệ Admin để xin lại Role."
+            else:
+                embed.description = f"<@{target_id}> đã hết thời gian xử phạt."
+                
             embed.color = discord.Color.green()
             
             await msg.edit(content=f"✅ <@{target_id}> đã hoàn thành án phạt!", embed=embed)
         except Exception:
             pass 
         
+        # Cập nhật DB trạng thái hoàn thành
         await punishment_collection.update_one(
             {"_id": doc["_id"]},
             {"$set": {"status": "completed", "delete_at": now + (30 * 60)}}
         )
         
-    # Xóa tin nhắn rác
+    # 3. XÓA TIN NHẮN RÁC (Sau khi hết hạn được 30 phút)
     cursor_del = punishment_collection.find({"status": "completed", "delete_at": {"$lte": now}})
     async for doc in cursor_del:
         try:
             channel = bot.get_channel(doc["channel_id"]) or await bot.fetch_channel(doc["channel_id"])
             msg = await channel.fetch_message(doc["message_id"])
             await msg.delete()
-        except:
+        except Exception:
             pass
         await punishment_collection.delete_one({"_id": doc["_id"]})
 
