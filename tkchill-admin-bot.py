@@ -9,6 +9,8 @@ from aiohttp import web
 import aiohttp
 import motor.motor_asyncio
 from pymongo import ReturnDocument
+import time
+start_time = time.time()
 
 # --- CẤU HÌNH (BẠ sN CẦN ĐIỀN ĐÚNG ID VÀO ĐÂY) ---
 TOKEN = os.environ.get("DISCORD_TOKEN")
@@ -64,9 +66,13 @@ intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 
-# === WEB SERVER ĐỂ NHẬN PING ===
 async def handle_ping(request):
-    return web.Response(text="Bot 2 is alive!")
+    headers = {'Access-Control-Allow-Origin': '*'}
+    uptime = time.time() - start_time
+    return web.json_response({
+        "status": "online",
+        "uptime": uptime
+    }, headers=headers)
 
 app = web.Application()
 app.add_routes([web.get('/', handle_ping)])
